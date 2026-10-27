@@ -57,7 +57,7 @@ type Config struct {
 	LogLevel              int
 	Gateway               bool
 	GatewayName           string
-	GatewayWhitelist      []glob.Glob
+	GatewayWhitelist      []*glob.Pattern
 	GatewayThrottle       int
 	GatewayTimeout        int
 	GatewayWebircPassword map[string]string
@@ -67,7 +67,7 @@ type Config struct {
 	Upstreams             []ConfigUpstream
 	Servers               []ConfigServer
 	ServerTransports      []string
-	RemoteOrigins         []glob.Glob
+	RemoteOrigins         []*glob.Pattern
 	ReverseProxies        []net.IPNet
 	Webroot               string
 	ClientRealname        string
@@ -142,8 +142,8 @@ func (c *Config) Load() error {
 	c.Upstreams = []ConfigUpstream{}
 	c.Servers = []ConfigServer{}
 	c.ServerTransports = []string{}
-	c.RemoteOrigins = []glob.Glob{}
-	c.GatewayWhitelist = []glob.Glob{}
+	c.RemoteOrigins = []*glob.Pattern{}
+	c.GatewayWhitelist = []*glob.Pattern{}
 	c.ReverseProxies = []net.IPNet{}
 	c.Webroot = ""
 	c.ReCaptchaURL = ""

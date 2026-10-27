@@ -4,7 +4,7 @@ package recaptcha
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -36,7 +36,7 @@ func (r *R) VerifyResponse(response string) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
 		r.lastError = append(r.lastError, err.Error())
 		return false

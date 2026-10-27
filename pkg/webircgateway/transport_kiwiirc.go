@@ -11,7 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/igm/sockjs-go/v3/sockjs"
-	cmap "github.com/orcaman/concurrent-map"
+	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 type TransportKiwiirc struct {
@@ -90,7 +90,7 @@ func (t *TransportKiwiirc) sessionHandler(session sockjs.Session) {
 		}
 	}()
 
-	channels := cmap.New()
+	channels := cmap.New[*TransportKiwiircChannel]()
 
 	// Read from sockjs
 	go func() {
@@ -102,9 +102,8 @@ func (t *TransportKiwiirc) sessionHandler(session sockjs.Session) {
 					// msg is in the form of ":chanId"
 					chanID := msg[1:]
 
-					c, channelExists := channels.Get(chanID)
+					channel, channelExists := channels.Get(chanID)
 					if channelExists {
-						channel := c.(*TransportKiwiircChannel)
 						channel.close()
 					}
 
@@ -132,8 +131,7 @@ func (t *TransportKiwiirc) sessionHandler(session sockjs.Session) {
 
 					channel, channelExists := channels.Get(chanID)
 					if channelExists {
-						c := channel.(*TransportKiwiircChannel)
-						c.handleIncomingLine(data)
+						channel.handleIncomingLine(data)
 					}
 				}
 			} else if err != nil {
@@ -143,7 +141,7 @@ func (t *TransportKiwiirc) sessionHandler(session sockjs.Session) {
 		}
 
 		for channel := range channels.IterBuffered() {
-			c := channel.Val.(*TransportKiwiircChannel)
+			c := channel.Val
 			c.Closed = true
 			c.Client.StartShutdown("client_closed")
 		}

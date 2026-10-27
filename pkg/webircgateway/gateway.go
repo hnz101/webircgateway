@@ -15,7 +15,7 @@ import (
 
 	"github.com/kiwiirc/webircgateway/pkg/identd"
 	"github.com/kiwiirc/webircgateway/pkg/proxy"
-	cmap "github.com/orcaman/concurrent-map"
+	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 var (
@@ -28,7 +28,7 @@ type Gateway struct {
 	LogOutput   chan string
 	messageTags *MessageTagManager
 	identdServ  identd.Server
-	Clients     cmap.ConcurrentMap
+	Clients     cmap.ConcurrentMap[string, *Client]
 	Acme        *LEManager
 	Function    string
 	httpSrvs    []*http.Server
@@ -45,7 +45,7 @@ func NewGateway(function string) *Gateway {
 	s.identdServ = identd.NewIdentdServer()
 	s.messageTags = NewMessageTagManager()
 	// Clients hold a map lookup for all the connected clients
-	s.Clients = cmap.New()
+	s.Clients = cmap.New[*Client]()
 	s.Acme = NewLetsEncryptManager(s)
 
 	return s
@@ -150,7 +150,7 @@ func (s *Gateway) initHttpRoutes() error {
 
 		out := ""
 		for item := range s.Clients.IterBuffered() {
-			c := item.Val.(*Client)
+			c := item.Val
 			line := fmt.Sprintf(
 				"%s:%d %s %s!%s %s %s",
 				c.UpstreamConfig.Hostname,

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/kiwiirc/webircgateway/pkg/irc"
 	"github.com/kiwiirc/webircgateway/pkg/recaptcha"
 	"golang.org/x/net/html/charset"
@@ -377,7 +377,7 @@ func (c *Client) ProcessLineFromClient(line string) (string, error) {
 		thisHost := strings.ToLower(c.UpstreamConfig.Hostname)
 		target := message.Params[0]
 		for val := range c.Gateway.Clients.IterBuffered() {
-			curClient := val.Val.(*Client)
+			curClient := val.Val
 			sameHost := strings.ToLower(curClient.UpstreamConfig.Hostname) == thisHost
 			if !sameHost {
 				continue
