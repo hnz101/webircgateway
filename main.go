@@ -10,7 +10,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/kiwiirc/webircgateway/pkg/webircgateway"
+	"github.com/hnz101/webircgateway/pkg/webircgateway"
 )
 
 var VERSION = "1.1.0"

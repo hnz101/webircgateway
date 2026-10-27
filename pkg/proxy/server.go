@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kiwiirc/webircgateway/pkg/identd"
+	"github.com/hnz101/webircgateway/pkg/identd"
 )
 
 const (

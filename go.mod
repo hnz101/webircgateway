@@ -1,4 +1,4 @@
-module github.com/kiwiirc/webircgateway
+module github.com/hnz101/webircgateway
 
 require (
 	github.com/OneOfOne/xxhash v1.2.8

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kiwiirc/webircgateway/pkg/webircgateway"
+	"github.com/hnz101/webircgateway/pkg/webircgateway"
 )
 
 func Start(gateway *webircgateway.Gateway, pluginsQuit *sync.WaitGroup) {

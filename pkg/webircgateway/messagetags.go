@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/OneOfOne/xxhash"
-	"github.com/kiwiirc/webircgateway/pkg/irc"
+	"github.com/hnz101/webircgateway/pkg/irc"
 )
 
 type MessageTagManager struct {

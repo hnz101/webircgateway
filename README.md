@@ -79,7 +79,7 @@ https://golang.org/dl/
 To download the source:
 
 ```console
-git clone https://github.com/kiwiirc/webircgateway.git && cd webircgateway
+git clone https://github.com/hnz101/webircgateway.git && cd webircgateway
 ```
 
 To update your existing source:

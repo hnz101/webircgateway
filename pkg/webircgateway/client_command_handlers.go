@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/kiwiirc/webircgateway/pkg/irc"
-	"github.com/kiwiirc/webircgateway/pkg/recaptcha"
+	"github.com/hnz101/webircgateway/pkg/irc"
+	"github.com/hnz101/webircgateway/pkg/recaptcha"
 	"golang.org/x/net/html/charset"
 	"golang.org/x/time/rate"
 )

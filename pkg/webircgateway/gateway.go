@@ -14,8 +14,8 @@ import (
 
 	"errors"
 
-	"github.com/kiwiirc/webircgateway/pkg/identd"
-	"github.com/kiwiirc/webircgateway/pkg/proxy"
+	"github.com/hnz101/webircgateway/pkg/identd"
+	"github.com/hnz101/webircgateway/pkg/proxy"
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
 

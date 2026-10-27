@@ -17,9 +17,9 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/kiwiirc/webircgateway/pkg/dnsbl"
-	"github.com/kiwiirc/webircgateway/pkg/irc"
-	"github.com/kiwiirc/webircgateway/pkg/proxy"
+	"github.com/hnz101/webircgateway/pkg/dnsbl"
+	"github.com/hnz101/webircgateway/pkg/irc"
+	"github.com/hnz101/webircgateway/pkg/proxy"
 )
 
 const (

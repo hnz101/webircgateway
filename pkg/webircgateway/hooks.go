@@ -1,6 +1,6 @@
 package webircgateway
 
-import "github.com/kiwiirc/webircgateway/pkg/irc"
+import "github.com/hnz101/webircgateway/pkg/irc"
 
 var hooksRegistered map[string][]interface{}
 
