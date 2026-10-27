@@ -36,7 +36,7 @@ run-proxy:
 	$(GOCMD) run main.go -run=proxy
 
 build-docker:
-	docker run --rm -v "$$PWD":/myapp -w /myapp golang:1.13.4 make
+	docker run --rm -v "$$PWD":/myapp -w /myapp golang:1.27 make
 	rm -rf ./dockerbuild
 	mkdir -p ./dockerbuild/plugins
 	mv webircgateway ./dockerbuild/kiwiserver

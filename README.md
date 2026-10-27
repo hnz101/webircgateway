@@ -72,7 +72,7 @@ If you are running an IRC network irc.network.org and you host your own webchat,
 
 
 ### Building and development
-webircgateway is built using golang - v1.11 or later is required for Go modules support to automatically acquire dependencies!
+webircgateway is built using golang - v1.22 or later is required (v1.27 recommended) for Go modules and generics support to automatically acquire dependencies!
 
 https://golang.org/dl/
 
