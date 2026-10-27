@@ -73,7 +73,7 @@ func (m *Message) ToLine() string {
 		}
 
 		if m.Prefix.Hostname != "" && prefix != "" {
-			prefix += "@" + m.Prefix.Username
+			prefix += "@" + m.Prefix.Hostname
 		} else if m.Prefix.Hostname != "" {
 			prefix += m.Prefix.Hostname
 		}

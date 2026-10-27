@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"errors"
 
@@ -213,11 +214,14 @@ func (s *Gateway) startServer(conf ConfigServer) {
 			return
 		}
 		srv := &http.Server{
-			Addr: addr,
+			Addr:              addr,
+			Handler:           s.HttpRouter,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       120 * time.Second,
 			TLSConfig: &tls.Config{
+				MinVersion:   tls.VersionTLS12,
 				Certificates: []tls.Certificate{keyPair},
 			},
-			Handler: s.HttpRouter,
 		}
 		s.httpSrvsMu.Lock()
 		s.httpSrvs = append(s.httpSrvs, srv)
@@ -232,13 +236,16 @@ func (s *Gateway) startServer(conf ConfigServer) {
 		}
 	} else if conf.TLS && conf.LetsEncryptCacheDir != "" {
 		s.Log(2, "Listening with letsencrypt TLS on %s", addr)
-		leManager := s.Acme.Get(conf.LetsEncryptCacheDir)
+		leManager := s.Acme.Get(conf.LetsEncryptCacheDir, conf.LetsEncryptHosts)
 		srv := &http.Server{
-			Addr: addr,
+			Addr:              addr,
+			Handler:           s.HttpRouter,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       120 * time.Second,
 			TLSConfig: &tls.Config{
+				MinVersion:     tls.VersionTLS12,
 				GetCertificate: leManager.GetCertificate,
 			},
-			Handler: s.HttpRouter,
 		}
 		s.httpSrvsMu.Lock()
 		s.httpSrvs = append(s.httpSrvs, srv)
@@ -264,7 +271,12 @@ func (s *Gateway) startServer(conf ConfigServer) {
 		http.Serve(server, s.HttpRouter)
 	} else {
 		s.Log(2, "Listening on %s", addr)
-		srv := &http.Server{Addr: addr, Handler: s.HttpRouter}
+		srv := &http.Server{
+			Addr:              addr,
+			Handler:           s.HttpRouter,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
 
 		s.httpSrvsMu.Lock()
 		s.httpSrvs = append(s.httpSrvs, srv)

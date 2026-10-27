@@ -86,18 +86,28 @@ func (s *Gateway) GetRemoteAddressFromRequest(req *http.Request) net.IP {
 		return remoteIP
 	}
 
+	// Prefer X-Real-IP if set by a trusted reverse proxy
+	if realIP := strings.TrimSpace(req.Header.Get("x-real-ip")); realIP != "" {
+		if ip := net.ParseIP(realIP); ip != nil {
+			return ip
+		}
+	}
+
 	headerVal := req.Header.Get("x-forwarded-for")
-	ips := strings.Split(headerVal, ",")
-	ipStr := strings.Trim(ips[0], " ")
-	if ipStr != "" {
-		ip := net.ParseIP(ipStr)
-		if ip != nil {
-			remoteIP = ip
+	if headerVal != "" {
+		ips := strings.Split(headerVal, ",")
+		// Walk backwards from right to left to find the first untrusted IP
+		for i := len(ips) - 1; i >= 0; i-- {
+			ipStr := strings.TrimSpace(ips[i])
+			if ip := net.ParseIP(ipStr); ip != nil {
+				if !s.isTrustedProxy(ip) || i == 0 {
+					return ip
+				}
+			}
 		}
 	}
 
 	return remoteIP
-
 }
 
 func (s *Gateway) isRequestSecure(req *http.Request) bool {

@@ -364,7 +364,10 @@ func (c *Client) makeUpstreamConnection() (io.ReadWriteCloser, error) {
 		}
 
 		if upstreamConfig.TLS {
-			tlsConfig := &tls.Config{InsecureSkipVerify: true}
+			tlsConfig := &tls.Config{
+				InsecureSkipVerify: !upstreamConfig.TLSVerify,
+				ServerName:         upstreamConfig.Hostname,
+			}
 			tlsConn := tls.Client(conn, tlsConfig)
 			err := tlsConn.Handshake()
 			if err != nil {

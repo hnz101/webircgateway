@@ -20,6 +20,7 @@ type ConfigUpstream struct {
 	Hostname             string
 	Port                 int
 	TLS                  bool
+	TLSVerify            bool
 	Timeout              int
 	Throttle             int
 	WebircPassword       string
@@ -39,6 +40,7 @@ type ConfigServer struct {
 	CertFile            string
 	KeyFile             string
 	LetsEncryptCacheDir string
+	LetsEncryptHosts    []string
 }
 
 type ConfigProxy struct {
@@ -238,6 +240,14 @@ func (c *Config) Load() error {
 			server.CertFile = confKeyAsString(section.Key("cert"), "")
 			server.KeyFile = confKeyAsString(section.Key("key"), "")
 			server.LetsEncryptCacheDir = confKeyAsString(section.Key("letsencrypt_cache"), "")
+			rawHosts := confKeyAsString(section.Key("letsencrypt_hosts"), "")
+			if rawHosts != "" {
+				for _, h := range strings.Split(rawHosts, ",") {
+					if trimmed := strings.TrimSpace(h); trimmed != "" {
+						server.LetsEncryptHosts = append(server.LetsEncryptHosts, trimmed)
+					}
+				}
+			}
 
 			if strings.HasSuffix(server.LetsEncryptCacheDir, ".cache") {
 				return errors.New("Syntax has changed. Please update letsencrypt_cache to a directory path (eg ./cache)")
@@ -267,6 +277,7 @@ func (c *Config) Load() error {
 				upstream.Hostname = hostname
 				upstream.Port = section.Key("port").MustInt(6667)
 				upstream.TLS = section.Key("tls").MustBool(false)
+				upstream.TLSVerify = section.Key("tls_verify").MustBool(true)
 			}
 
 			upstream.Timeout = section.Key("timeout").MustInt(10)

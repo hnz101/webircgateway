@@ -52,6 +52,9 @@ port = 80
 # free certificate using letsencrypt.com (overrides the above cert/key options). This requires
 # a server running on port 80 to initially generate the certificate.
 #letsencrypt_cache = ./certs
+# Whitelist specific domains for Let's Encrypt certificate issuance (comma-separated).
+# Strongly recommended to prevent unauthorized certificate requests.
+#letsencrypt_hosts = kiwiirc.example.com, webirc.example.com
 
 # Example unix socket server
 #[server.3]
@@ -91,6 +94,9 @@ kiwiirc
 hostname = "irc.example.net"
 port = 6667
 tls = false
+# Verify TLS certificate chain and hostname for upstream TLS connections (default: true).
+# Set to false only for servers with self-signed certificates.
+#tls_verify = true
 # Connection timeout in seconds
 timeout = 5
 # Throttle the lines being written by X per second

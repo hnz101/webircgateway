@@ -6,6 +6,7 @@ import (
 	"net/textproto"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Server - An IdentD server
@@ -56,6 +57,7 @@ func (i *Server) ListenForRequests(serverSocket *net.Listener) {
 		}
 
 		go func(conn net.Conn) {
+			conn.SetDeadline(time.Now().Add(10 * time.Second))
 			tc := textproto.NewConn(conn)
 
 			line, err := tc.ReadLine()
