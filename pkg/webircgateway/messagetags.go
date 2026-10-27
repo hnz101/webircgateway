@@ -29,7 +29,7 @@ func NewMessageTagManager() *MessageTagManager {
 }
 
 func (tags *MessageTagManager) CanMessageContainClientTags(msg *irc.Message) bool {
-	return stringInSlice(msg.Command, []string{
+	return stringInSlice(strings.ToUpper(msg.Command), []string{
 		"PRIVMSG",
 		"NOTICE",
 		"TAGMSG",
@@ -39,11 +39,12 @@ func (tags *MessageTagManager) CanMessageContainClientTags(msg *irc.Message) boo
 func (tags *MessageTagManager) RunGarbageCollectionLoop() {
 	for {
 		tags.Mutex.Lock()
+		now := time.Now()
 		for messageHash, timeCreated := range tags.gcTimes {
-			if timeCreated.Add(time.Second * 30).After(time.Now()) {
+			if now.Sub(timeCreated) > time.Second*30 {
 				delete(tags.knownTags, messageHash)
+				delete(tags.gcTimes, messageHash)
 			}
-
 		}
 		tags.Mutex.Unlock()
 

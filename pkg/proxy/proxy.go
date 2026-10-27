@@ -29,13 +29,15 @@ type KiwiProxyConnection struct {
 	DestHost       string
 	DestPort       int
 	DestTLS        bool
+	DestTLSVerify  bool
 	State          KiwiProxyState
 	Conn           *net.Conn
 }
 
 func MakeKiwiProxyConnection() *KiwiProxyConnection {
 	return &KiwiProxyConnection{
-		State: KiwiProxyStateClosed,
+		DestTLSVerify: true,
+		State:         KiwiProxyStateClosed,
 	}
 }
 
@@ -63,16 +65,17 @@ func (c *KiwiProxyConnection) Dial(proxyServerAddr string) error {
 	c.State = KiwiProxyStateHandshaking
 
 	meta, _ := json.Marshal(map[string]interface{}{
-		"username":  c.Username,
-		"interface": c.ProxyInterface,
-		"host":      c.DestHost,
-		"port":      c.DestPort,
-		"ssl":       c.DestTLS,
+		"username":   c.Username,
+		"interface":  c.ProxyInterface,
+		"host":       c.DestHost,
+		"port":       c.DestPort,
+		"ssl":        c.DestTLS,
+		"tls_verify": c.DestTLSVerify,
 	})
 
 	(*c.Conn).Write(append(meta, byte('\n')))
 
-	buf := make([]byte, 1024)
+	buf := make([]byte, 1)
 	bufLen, readErr := (*c.Conn).Read(buf)
 	if readErr != nil {
 		(*c.Conn).Close()
@@ -80,7 +83,7 @@ func (c *KiwiProxyConnection) Dial(proxyServerAddr string) error {
 		return readErr
 	}
 
-	response := string(buf)
+	response := string(buf[:bufLen])
 	if bufLen > 0 && response[0] == '1' {
 		c.State = KiwiProxyStateConnected
 	} else {
@@ -102,6 +105,8 @@ func (c *KiwiProxyConnection) Dial(proxyServerAddr string) error {
 			return &ConnError{Msg: "Host not found", Type: "not_found"}
 		case '5':
 			return &ConnError{Msg: "Connection timed out", Type: "conn_timeout"}
+		default:
+			return errors.New("The proxy could not connect to the destination")
 		}
 	}
 

@@ -1,13 +1,24 @@
 package identd
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"net"
 	"net/textproto"
 	"strings"
 	"sync"
 	"time"
 )
+
+func sanitizeIdent(ident string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r == '\x00' || r == ':' || r == ' ' {
+			return -1
+		}
+		return r
+	}, ident)
+}
 
 // Server - An IdentD server
 type Server struct {
@@ -24,8 +35,9 @@ func NewIdentdServer() Server {
 
 // AddIdent - Add an ident to be looked up
 func (i *Server) AddIdent(localPort, remotePort int, ident string, iface string) {
+	cleanIdent := sanitizeIdent(ident)
 	i.EntriesLock.Lock()
-	i.Entries[fmt.Sprintf("%d-%d", localPort, remotePort)] = ident
+	i.Entries[fmt.Sprintf("%d-%d", localPort, remotePort)] = cleanIdent
 	i.EntriesLock.Unlock()
 }
 
@@ -57,12 +69,12 @@ func (i *Server) ListenForRequests(serverSocket *net.Listener) {
 		}
 
 		go func(conn net.Conn) {
+			defer conn.Close()
 			conn.SetDeadline(time.Now().Add(10 * time.Second))
-			tc := textproto.NewConn(conn)
+			tr := textproto.NewReader(bufio.NewReader(io.LimitReader(conn, 1024)))
 
-			line, err := tc.ReadLine()
+			line, err := tr.ReadLine()
 			if err != nil {
-				conn.Close()
 				return
 			}
 
@@ -78,11 +90,9 @@ func (i *Server) ListenForRequests(serverSocket *net.Listener) {
 				if !ok {
 					fmt.Fprintf(conn, "%d, %d : ERROR : NO-USER\r\n", localPort, remotePort)
 				} else {
-					fmt.Fprintf(conn, "%d, %d : USERID : UNIX : %s\r\n", localPort, remotePort, ident)
+					fmt.Fprintf(conn, "%d, %d : USERID : UNIX : %s\r\n", localPort, remotePort, sanitizeIdent(ident))
 				}
 			}
-
-			conn.Close()
 		}(client)
 	}
 }

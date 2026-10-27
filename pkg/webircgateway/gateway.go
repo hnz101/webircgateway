@@ -53,7 +53,11 @@ func NewGateway(function string) *Gateway {
 }
 
 func (s *Gateway) Log(level int, format string, args ...interface{}) {
-	if level < s.Config.LogLevel {
+	s.Config.RLock()
+	logLevel := s.Config.LogLevel
+	s.Config.RUnlock()
+
+	if level < logLevel || level < 1 || level > 3 {
 		return
 	}
 
@@ -76,7 +80,10 @@ func (s *Gateway) Start() {
 	}
 
 	if s.Function == "proxy" {
-		proxy.Start(fmt.Sprintf("%s:%d", s.Config.Proxy.LocalAddr, s.Config.Proxy.Port))
+		s.Config.RLock()
+		proxyAddr := net.JoinHostPort(s.Config.Proxy.LocalAddr, strconv.Itoa(s.Config.Proxy.Port))
+		s.Config.RUnlock()
+		proxy.Start(proxyAddr)
 	}
 }
 

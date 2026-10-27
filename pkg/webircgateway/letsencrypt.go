@@ -32,7 +32,11 @@ func (le *LEManager) Get(certCacheDir string, allowedHosts []string) *autocert.M
 			hostPolicy = autocert.HostWhitelist(allowedHosts...)
 		} else {
 			hostPolicy = func(ctx context.Context, host string) error {
-				if len(le.gateway.Config.RemoteOrigins) > 0 &&
+				le.gateway.Config.RLock()
+				hasOrigins := len(le.gateway.Config.RemoteOrigins) > 0
+				le.gateway.Config.RUnlock()
+
+				if hasOrigins &&
 					!le.gateway.IsClientOriginAllowed("https://"+host) &&
 					!le.gateway.IsClientOriginAllowed(host) {
 					return fmt.Errorf("host %s is not permitted for certificate issuance", host)

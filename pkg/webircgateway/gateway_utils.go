@@ -15,8 +15,12 @@ func (s *Gateway) NewClient() *Client {
 }
 
 func (s *Gateway) IsClientOriginAllowed(originHeader string) bool {
+	s.Config.RLock()
+	origins := s.Config.RemoteOrigins
+	s.Config.RUnlock()
+
 	// Empty list of origins = all origins allowed
-	if len(s.Config.RemoteOrigins) == 0 {
+	if len(origins) == 0 {
 		return true
 	}
 
@@ -25,10 +29,11 @@ func (s *Gateway) IsClientOriginAllowed(originHeader string) bool {
 		return true
 	}
 
+	originLower := strings.ToLower(originHeader)
 	foundMatch := false
 
-	for _, originMatch := range s.Config.RemoteOrigins {
-		if originMatch.Match(originHeader) {
+	for _, originMatch := range origins {
+		if originMatch.Match(originLower) {
 			foundMatch = true
 			break
 		}
@@ -38,15 +43,40 @@ func (s *Gateway) IsClientOriginAllowed(originHeader string) bool {
 }
 
 func (s *Gateway) isIrcAddressAllowed(addr string) bool {
-	// Empty whitelist = all destinations allowed
-	if len(s.Config.GatewayWhitelist) == 0 {
+	if addr == "" {
+		return false
+	}
+
+	addrLower := strings.ToLower(strings.TrimSpace(addr))
+	if addrLower == "localhost" || strings.HasSuffix(addrLower, ".localhost") {
+		return false
+	}
+
+	if ip := net.ParseIP(addrLower); ip != nil {
+		if isInternalOrRestrictedIP(ip) {
+			return false
+		}
+	} else if ips, err := net.LookupIP(addrLower); err == nil {
+		for _, ip := range ips {
+			if isInternalOrRestrictedIP(ip) {
+				return false
+			}
+		}
+	}
+
+	s.Config.RLock()
+	whitelist := s.Config.GatewayWhitelist
+	s.Config.RUnlock()
+
+	// Empty whitelist = all public destinations allowed
+	if len(whitelist) == 0 {
 		return true
 	}
 
 	foundMatch := false
 
-	for _, addrMatch := range s.Config.GatewayWhitelist {
-		if addrMatch.Match(addr) {
+	for _, addrMatch := range whitelist {
+		if addrMatch.Match(addrLower) {
 			foundMatch = true
 			break
 		}
@@ -57,6 +87,9 @@ func (s *Gateway) isIrcAddressAllowed(addr string) bool {
 
 func (s *Gateway) findUpstream() (ConfigUpstream, error) {
 	var ret ConfigUpstream
+
+	s.Config.RLock()
+	defer s.Config.RUnlock()
 
 	if len(s.Config.Upstreams) == 0 {
 		return ret, errors.New("No upstreams available")
@@ -69,6 +102,9 @@ func (s *Gateway) findUpstream() (ConfigUpstream, error) {
 }
 
 func (s *Gateway) findWebircPassword(ircHost string) string {
+	s.Config.RLock()
+	defer s.Config.RUnlock()
+
 	pass, exists := s.Config.GatewayWebircPassword[strings.ToLower(ircHost)]
 	if !exists {
 		pass = ""
@@ -84,13 +120,6 @@ func (s *Gateway) GetRemoteAddressFromRequest(req *http.Request) net.IP {
 	// the headers and use the remoteIP as the users IP
 	if !s.isTrustedProxy(remoteIP) {
 		return remoteIP
-	}
-
-	// Prefer X-Real-IP if set by a trusted reverse proxy
-	if realIP := strings.TrimSpace(req.Header.Get("x-real-ip")); realIP != "" {
-		if ip := net.ParseIP(realIP); ip != nil {
-			return ip
-		}
 	}
 
 	headerVal := req.Header.Get("x-forwarded-for")
@@ -120,10 +149,17 @@ func (s *Gateway) isRequestSecure(req *http.Request) bool {
 	}
 
 	fwdProto := req.Header.Get("x-forwarded-proto")
-	return strings.EqualFold(fwdProto, "https")
+	return req.TLS != nil || strings.EqualFold(fwdProto, "https")
 }
 
 func (s *Gateway) isTrustedProxy(remoteIP net.IP) bool {
+	if remoteIP == nil {
+		return false
+	}
+
+	s.Config.RLock()
+	defer s.Config.RUnlock()
+
 	for _, cidrRange := range s.Config.ReverseProxies {
 		if cidrRange.Contains(remoteIP) {
 			return true

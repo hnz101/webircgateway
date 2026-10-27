@@ -32,6 +32,7 @@ type HandshakeMeta struct {
 	Host      string `json:"host"`
 	Port      int    `json:"port"`
 	TLS       bool   `json:"ssl"`
+	TLSVerify bool   `json:"tls_verify"`
 	Username  string `json:"username"`
 	Interface string `json:"interface"`
 }
@@ -44,11 +45,14 @@ func MakeClient(conn net.Conn) *Client {
 
 type Client struct {
 	Client       net.Conn
+	ClientReader io.Reader
 	Upstream     net.Conn
 	UpstreamAddr *net.TCPAddr
+	Host         string
 	Username     string
 	BindAddr     *net.TCPAddr
 	TLS          bool
+	TLSVerify    bool
 }
 
 func (c *Client) Run() {
@@ -57,12 +61,14 @@ func (c *Client) Run() {
 	err = c.Handshake()
 	if err != nil {
 		log.Println(err.Error())
+		c.Client.Close()
 		return
 	}
 
 	err = c.ConnectUpstream()
 	if err != nil {
 		log.Println(err.Error())
+		c.Client.Close()
 		return
 	}
 
@@ -70,10 +76,15 @@ func (c *Client) Run() {
 }
 
 func (c *Client) Handshake() error {
-	// Read the first line - it should be JSON
-	reader := bufio.NewReader(c.Client)
-	line, readErr := reader.ReadBytes('\n')
+	_ = c.Client.SetDeadline(time.Now().Add(10 * time.Second))
+	defer c.Client.SetDeadline(time.Time{})
+
+	// Read the first line - it should be JSON (bounded to 4096 bytes)
+	reader := bufio.NewReaderSize(c.Client, 4096)
+	c.ClientReader = reader
+	line, readErr := reader.ReadSlice('\n')
 	if readErr != nil {
+		c.Client.Write([]byte(ResponseError))
 		return readErr
 	}
 
@@ -81,6 +92,7 @@ func (c *Client) Handshake() error {
 		Username:  "user",
 		Port:      6667,
 		Interface: "0.0.0.0",
+		TLSVerify: true,
 	}
 	unmarshalErr := json.Unmarshal(line, &meta)
 	if unmarshalErr != nil {
@@ -88,18 +100,20 @@ func (c *Client) Handshake() error {
 		return unmarshalErr
 	}
 
-	if meta.Host == "" || meta.Port == 0 || meta.Username == "" || meta.Interface == "" {
+	if meta.Host == "" || meta.Port < 1024 || meta.Port > 65535 || meta.Username == "" || meta.Interface == "" {
 		c.Client.Write([]byte(ResponseError))
-		return fmt.Errorf("missing args")
+		return fmt.Errorf("missing or invalid args")
 	}
 
+	c.Host = meta.Host
 	c.Username = meta.Username
 	c.TLS = meta.TLS
+	c.TLSVerify = meta.TLSVerify
 
 	bindAddr, bindAddrErr := net.ResolveTCPAddr("tcp", meta.Interface+":")
 	if bindAddrErr != nil {
 		c.Client.Write([]byte(ResponseError))
-		return fmt.Errorf("interface: " + bindAddrErr.Error())
+		return fmt.Errorf("interface: %w", bindAddrErr)
 	}
 	c.BindAddr = bindAddr
 
@@ -107,7 +121,11 @@ func (c *Client) Handshake() error {
 	addr, addrErr := net.ResolveTCPAddr("tcp", hostStr)
 	if addrErr != nil {
 		c.Client.Write([]byte(ResponseUnknownHost))
-		return fmt.Errorf("remote host: " + addrErr.Error())
+		return fmt.Errorf("remote host: %w", addrErr)
+	}
+	if addr.IP == nil || addr.IP.IsLoopback() || addr.IP.IsLinkLocalUnicast() || addr.IP.IsLinkLocalMulticast() || addr.IP.IsMulticast() || addr.IP.IsUnspecified() {
+		c.Client.Write([]byte(ResponseError))
+		return fmt.Errorf("restricted remote host: %s", meta.Host)
 	}
 	c.UpstreamAddr = addr
 
@@ -121,7 +139,7 @@ func (c *Client) ConnectUpstream() error {
 
 	conn, err := dialer.Dial("tcp", c.UpstreamAddr.String())
 	if err != nil {
-		response := ""
+		response := ResponseError
 		errType := typeOfErr(err)
 		switch errType {
 		case "timeout":
@@ -143,11 +161,21 @@ func (c *Client) ConnectUpstream() error {
 	}
 
 	if c.TLS {
-		tlsConfig := &tls.Config{InsecureSkipVerify: true}
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: !c.TLSVerify,
+			ServerName:         c.Host,
+		}
 		tlsConn := tls.Client(conn, tlsConfig)
+		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 		err := tlsConn.Handshake()
+		_ = conn.SetDeadline(time.Time{})
 		if err != nil {
 			conn.Close()
+			if identdRpc != nil {
+				lAddr, lPortStr, _ := net.SplitHostPort(conn.LocalAddr().String())
+				lPort, _ := strconv.Atoi(lPortStr)
+				identdRpc.RemoveIdent(lPort, c.UpstreamAddr.Port, c.Username, lAddr)
+			}
 			c.Client.Write([]byte(ResponseReset))
 			return err
 		}
@@ -164,6 +192,11 @@ func (c *Client) Pipe() {
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 
+	clientReader := c.ClientReader
+	if clientReader == nil {
+		clientReader = c.Client
+	}
+
 	go func() {
 		io.Copy(c.Client, c.Upstream)
 		c.Client.Close()
@@ -171,7 +204,7 @@ func (c *Client) Pipe() {
 	}()
 
 	go func() {
-		io.Copy(c.Upstream, c.Client)
+		io.Copy(c.Upstream, clientReader)
 		c.Upstream.Close()
 		wg.Done()
 	}()

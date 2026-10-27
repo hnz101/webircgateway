@@ -25,19 +25,19 @@ func (t *TransportSockjs) Init(g *Gateway) {
 }
 
 func (t *TransportSockjs) sessionHandler(session sockjs.Session) {
-	client := t.gateway.NewClient()
-
 	originHeader := strings.ToLower(session.Request().Header.Get("Origin"))
 	if !t.gateway.IsClientOriginAllowed(originHeader) {
-		client.Log(2, "Origin %s not allowed. Closing connection", originHeader)
+		t.gateway.Log(2, "Origin %s not allowed. Closing connection", originHeader)
 		session.Close(0, "Origin not allowed")
 		return
 	}
 
+	client := t.gateway.NewClient()
+
 	client.RemoteAddr = t.gateway.GetRemoteAddressFromRequest(session.Request()).String()
 
 	clientHostnames, err := net.LookupAddr(client.RemoteAddr)
-	if err != nil {
+	if err != nil || len(clientHostnames) == 0 {
 		client.RemoteHostname = client.RemoteAddr
 	} else {
 		// FQDNs include a . at the end. Strip it out
@@ -69,12 +69,14 @@ func (t *TransportSockjs) sessionHandler(session sockjs.Session) {
 		for {
 			msg, err := session.Recv()
 			if err == nil && len(msg) > 0 {
-				client.Log(1, "client->: %s", msg)
-				select {
-				case client.Recv <- msg:
-				default:
-					client.Log(3, "Recv queue full. Dropping data")
-					// TODO: Should this really just drop the data or close the connection?
+				for _, message := range splitClientLines(msg) {
+					client.Log(1, "client->: %s", message)
+					select {
+					case client.Recv <- message:
+					default:
+						client.Log(3, "Recv queue full. Dropping data")
+						// TODO: Should this really just drop the data or close the connection?
+					}
 				}
 			} else if err != nil {
 				client.Log(1, "sockjs connection closed (%s)", err.Error())
@@ -91,6 +93,7 @@ func (t *TransportSockjs) sessionHandler(session sockjs.Session) {
 	for {
 		signal, ok := <-client.Signals
 		if !ok {
+			session.Close(0, "Closed")
 			break
 		}
 

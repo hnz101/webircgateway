@@ -2,6 +2,7 @@ package webircgateway
 
 import (
 	"errors"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,52 @@ import (
 )
 
 var MAX_EXTJWT_SIZE = 200
+
+func (c *Client) getPrefixModes() string {
+	prefixToken := c.IrcState.ISupport.GetToken("PREFIX")
+	if prefixToken != "" && strings.HasPrefix(prefixToken, "(") {
+		endIdx := strings.Index(prefixToken, ")")
+		if endIdx > 1 {
+			return prefixToken[1:endIdx]
+		}
+	}
+	return "qaohv"
+}
+
+func (c *Client) modeTakesParam(mode string, adding bool) (takesParam bool, isPrefixMode bool) {
+	if strings.Contains(c.getPrefixModes(), mode) {
+		return true, true
+	}
+
+	chanModes := c.IrcState.ISupport.GetToken("CHANMODES")
+	if chanModes == "" {
+		chanModes = "beI,k,l,imnpst"
+	}
+	parts := strings.Split(chanModes, ",")
+	// Type A (list modes) and Type B (always parameter)
+	if len(parts) > 0 && strings.Contains(parts[0], mode) {
+		return true, false
+	}
+	if len(parts) > 1 && strings.Contains(parts[1], mode) {
+		return true, false
+	}
+	// Type C (parameter only when setting)
+	if len(parts) > 2 && strings.Contains(parts[2], mode) {
+		return adding, false
+	}
+	return false, false
+}
+
+func (c *Client) isChannelTarget(target string) bool {
+	if target == "" {
+		return false
+	}
+	chanTypes := c.IrcState.ISupport.GetToken("CHANTYPES")
+	if chanTypes == "" {
+		chanTypes = "#&"
+	}
+	return strings.ContainsRune(chanTypes, rune(target[0]))
+}
 
 /*
  * ProcessLineFromUpstream
@@ -39,9 +86,13 @@ func (c *Client) ProcessLineFromUpstream(data string) string {
 
 		// Throttle writes if configured, but only after registration is complete. Typical IRCd
 		// behavior is to not throttle registration commands.
-		client.ThrottledRecv.Limiter = rate.NewLimiter(rate.Limit(client.UpstreamConfig.Throttle), 1)
+		if client.UpstreamConfig.Throttle > 0 {
+			client.ThrottledRecv.Limiter.SetLimit(rate.Limit(client.UpstreamConfig.Throttle))
+		} else {
+			client.ThrottledRecv.Limiter.SetLimit(rate.Inf)
+		}
 	}
-	if pLen > 0 && m.Command == "005" {
+	if pLen >= 2 && m.Command == "005" {
 		tokenPairs := m.Params[1 : pLen-1]
 		iSupport := c.IrcState.ISupport
 		iSupport.Received = true
@@ -57,10 +108,14 @@ func (c *Client) ProcessLineFromUpstream(data string) string {
 		msg.Prefix = &c.ServerMessagePrefix
 		msg.Params = append(msg.Params, c.IrcState.Nick)
 
+		c.Gateway.Config.RLock()
+		hasSecret := c.Gateway.Config.Secret != ""
+		c.Gateway.Config.RUnlock()
+
 		if iSupport.HasToken("EXTJWT") {
 			c.Log(1, "Upstream already supports EXTJWT, disabling feature")
 			c.Features.ExtJwt = false
-		} else {
+		} else if c.Features.ExtJwt && hasSecret {
 			// Add EXTJWT ISupport token
 			msg.Params = append(msg.Params, "EXTJWT=1")
 			iSupport.AddToken("EXTJWT=1")
@@ -100,7 +155,7 @@ func (c *Client) ProcessLineFromUpstream(data string) string {
 			modes := m.GetParam(1, "")
 
 			channel := c.IrcState.GetChannel(channelName)
-			if channel != nil {
+			if channel == nil {
 				channel = irc.NewStateChannel(channelName)
 				c.IrcState.SetChannel(channel)
 			}
@@ -115,13 +170,16 @@ func (c *Client) ProcessLineFromUpstream(data string) string {
 				} else if mode == "-" {
 					adding = false
 				} else {
-					paramIdx++
-					param := m.GetParam(paramIdx, "")
-					if strings.EqualFold(param, c.IrcState.Nick) {
-						if adding {
-							channel.Modes[mode] = ""
-						} else {
-							delete(channel.Modes, mode)
+					takesParam, isPrefixMode := c.modeTakesParam(mode, adding)
+					if takesParam && paramIdx+1 < pLen {
+						paramIdx++
+						param := m.GetParam(paramIdx, "")
+						if isPrefixMode && strings.EqualFold(param, c.IrcState.Nick) {
+							if adding {
+								channel.Modes[mode] = ""
+							} else {
+								delete(channel.Modes, mode)
+							}
 						}
 					}
 				}
@@ -157,6 +215,7 @@ func (c *Client) ProcessLineFromUpstream(data string) string {
 	// If we requested message-tags, make sure to include it in the ACK when
 	// the IRCd sends the ACK through
 	if m != nil &&
+		pLen >= 3 &&
 		client.RequestedMessageTagsCap != "" &&
 		strings.ToUpper(m.Command) == "CAP" &&
 		m.GetParamU(1, "") == "ACK" &&
@@ -189,6 +248,7 @@ func (c *Client) ProcessLineFromUpstream(data string) string {
  * Processes and makes any changes to a line of data sent from a client
  */
 func (c *Client) ProcessLineFromClient(line string) (string, error) {
+	line = sanitizeIrcText(line)
 	message, err := irc.ParseLine(line)
 	// Just pass any random data upstream
 	if err != nil {
@@ -211,9 +271,14 @@ func (c *Client) ProcessLineFromClient(line string) (string, error) {
 	if !c.Verified && strings.ToUpper(message.Command) == "CAPTCHA" {
 		verified := false
 		if len(message.Params) >= 1 {
+			c.Gateway.Config.RLock()
+			recaptchaURL := c.Gateway.Config.ReCaptchaURL
+			recaptchaSecret := c.Gateway.Config.ReCaptchaSecret
+			c.Gateway.Config.RUnlock()
+
 			captcha := recaptcha.R{
-				URL:    c.Gateway.Config.ReCaptchaURL,
-				Secret: c.Gateway.Config.ReCaptchaSecret,
+				URL:    recaptchaURL,
+				Secret: recaptchaSecret,
 			}
 
 			verified = captcha.VerifyResponse(message.Params[0])
@@ -234,7 +299,7 @@ func (c *Client) ProcessLineFromClient(line string) (string, error) {
 	// NICK <nickname>
 	if strings.ToUpper(message.Command) == "NICK" && !c.UpstreamStarted {
 		if len(message.Params) > 0 {
-			c.IrcState.Nick = message.Params[0]
+			c.IrcState.Nick = sanitizeIrcToken(message.Params[0])
 		}
 
 		if !c.UpstreamStarted {
@@ -248,13 +313,20 @@ func (c *Client) ProcessLineFromClient(line string) (string, error) {
 			return line, errors.New("Invalid USER line")
 		}
 
-		if c.Gateway.Config.ClientUsername != "" {
-			message.Params[0] = makeClientReplacements(c.Gateway.Config.ClientUsername, c)
+		c.Gateway.Config.RLock()
+		cfgClientUsername := c.Gateway.Config.ClientUsername
+		cfgClientRealname := c.Gateway.Config.ClientRealname
+		c.Gateway.Config.RUnlock()
+
+		if cfgClientUsername != "" {
+			message.Params[0] = makeClientReplacements(cfgClientUsername, c)
 		}
-		if c.Gateway.Config.ClientRealname != "" {
-			message.Params[3] = makeClientReplacements(c.Gateway.Config.ClientRealname, c)
+		if cfgClientRealname != "" {
+			message.Params[3] = makeClientReplacements(cfgClientRealname, c)
 		}
 
+		message.Params[0] = sanitizeIrcToken(message.Params[0])
+		message.Params[3] = sanitizeIrcText(message.Params[3])
 		line = message.ToLine()
 
 		c.IrcState.Username = message.Params[0]
@@ -282,7 +354,11 @@ func (c *Client) ProcessLineFromClient(line string) (string, error) {
 		// HOST irc.network.net:6667
 		// HOST irc.network.net:+6667
 
-		if !c.Gateway.Config.Gateway {
+		c.Gateway.Config.RLock()
+		gatewayEnabled := c.Gateway.Config.Gateway
+		c.Gateway.Config.RUnlock()
+
+		if !gatewayEnabled {
 			return "", nil
 		}
 
@@ -290,34 +366,48 @@ func (c *Client) ProcessLineFromClient(line string) (string, error) {
 			return "", nil
 		}
 
-		addr := message.Params[0]
+		addr := strings.TrimSpace(message.Params[0])
 		if addr == "" {
 			c.SendIrcError("Missing host")
 			c.StartShutdown("missing_host")
 			return "", nil
 		}
 
-		// Parse host:+port into the c.dest* vars
-		portSep := strings.LastIndex(addr, ":")
-		if portSep == -1 {
-			c.DestHost = addr
-			c.DestPort = 6667
-			c.DestTLS = false
-		} else {
-			c.DestHost = addr[0:portSep]
-			portParam := addr[portSep+1:]
-			if len(portParam) > 0 && portParam[0:1] == "+" {
+		parsePortParam := func(portParam string) {
+			if strings.HasPrefix(portParam, "+") {
 				c.DestTLS = true
 				c.DestPort, err = strconv.Atoi(portParam[1:])
 				if err != nil {
 					c.DestPort = 6697
 				}
 			} else {
-				c.DestPort, err = strconv.Atoi(portParam[0:])
+				c.DestTLS = false
+				c.DestPort, err = strconv.Atoi(portParam)
 				if err != nil {
 					c.DestPort = 6667
 				}
 			}
+		}
+
+		// Parse host:+port (including IPv6) into the c.Dest* vars
+		if net.ParseIP(addr) != nil {
+			c.DestHost = addr
+			c.DestPort = 6667
+			c.DestTLS = false
+		} else if strings.HasPrefix(addr, "[") && strings.HasSuffix(addr, "]") {
+			c.DestHost = strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+			c.DestPort = 6667
+			c.DestTLS = false
+		} else if host, portParam, splitErr := net.SplitHostPort(addr); splitErr == nil {
+			c.DestHost = host
+			parsePortParam(portParam)
+		} else if portSep := strings.LastIndex(addr, ":"); portSep == -1 {
+			c.DestHost = addr
+			c.DestPort = 6667
+			c.DestTLS = false
+		} else {
+			c.DestHost = strings.TrimSuffix(strings.TrimPrefix(addr[0:portSep], "["), "]")
+			parsePortParam(addr[portSep+1:])
 		}
 
 		// Don't send the HOST command upstream
@@ -364,8 +454,13 @@ func (c *Client) ProcessLineFromClient(line string) (string, error) {
 		}
 	}
 
-	if c.Features.Messagetags && message.Command == "TAGMSG" {
-		if len(message.Params) == 0 {
+	if c.Features.Messagetags && strings.ToUpper(message.Command) == "TAGMSG" {
+		if len(message.Params) == 0 || c.State != ClientStateConnected || c.UpstreamConfig.Hostname == "" {
+			return "", nil
+		}
+
+		target := message.Params[0]
+		if c.isChannelTarget(target) && !c.IrcState.HasChannel(target) {
 			return "", nil
 		}
 
@@ -375,9 +470,11 @@ func (c *Client) ProcessLineFromClient(line string) (string, error) {
 		message.Prefix.Username = ""
 
 		thisHost := strings.ToLower(c.UpstreamConfig.Hostname)
-		target := message.Params[0]
 		for val := range c.Gateway.Clients.IterBuffered() {
 			curClient := val.Val
+			if curClient.State != ClientStateConnected {
+				continue
+			}
 			sameHost := strings.ToLower(curClient.UpstreamConfig.Hostname) == thisHost
 			if !sameHost {
 				continue
@@ -396,7 +493,9 @@ func (c *Client) ProcessLineFromClient(line string) (string, error) {
 
 	// Check for any client message tags so that we can store them for replaying to other clients
 	if c.Features.Messagetags && c.Gateway.messageTags.CanMessageContainClientTags(message) {
-		c.Gateway.messageTags.AddTagsFromMessage(c, c.IrcState.Nick, message)
+		if c.State == ClientStateConnected && c.UpstreamConfig.Hostname != "" {
+			c.Gateway.messageTags.AddTagsFromMessage(c, c.IrcState.Nick, message)
+		}
 		// Prevent any client tags heading upstream
 		for k := range message.Tags {
 			if len(k) > 0 && k[0] == '+' {
@@ -408,6 +507,19 @@ func (c *Client) ProcessLineFromClient(line string) (string, error) {
 	}
 
 	if c.Features.ExtJwt && strings.ToUpper(message.Command) == "EXTJWT" {
+		c.Gateway.Config.RLock()
+		secret := c.Gateway.Config.Secret
+		c.Gateway.Config.RUnlock()
+
+		if secret == "" {
+			c.SendIrcFail("EXTJWT", "UNAVAILABLE", "EXTJWT is not configured")
+			return "", nil
+		}
+		if c.State != ClientStateConnected {
+			c.SendIrcFail("EXTJWT", "NOT_REGISTERED", "You have not registered")
+			return "", nil
+		}
+
 		tokenTarget := message.GetParam(0, "")
 		tokenService := message.GetParam(1, "")
 
@@ -468,7 +580,7 @@ func (c *Client) ProcessLineFromClient(line string) (string, error) {
 		}
 
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, tokenData)
-		tokenSigned, tokenSignedErr := token.SignedString([]byte(c.Gateway.Config.Secret))
+		tokenSigned, tokenSignedErr := token.SignedString([]byte(secret))
 		if tokenSignedErr != nil {
 			c.Log(3, "Error creating JWT token. %s", tokenSignedErr.Error())
 			c.SendIrcFail("EXTJWT", "UNKNOWN_ERROR", "Failed to generate token")
@@ -481,6 +593,7 @@ func (c *Client) ProcessLineFromClient(line string) (string, error) {
 			tokenSigned = tokenSigned[MAX_EXTJWT_SIZE:]
 
 			tokenPartM := tokenM
+			tokenPartM.Params = append([]string{}, tokenM.Params...)
 			tokenPartM.Params = append(tokenPartM.Params, "*", tokenSignedPart)
 			c.SendClientSignal("data", tokenPartM.ToLine())
 		}

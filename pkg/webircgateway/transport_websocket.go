@@ -41,6 +41,7 @@ func (t *TransportWebsocket) websocketHandler(w http.ResponseWriter, req *http.R
 		return
 	}
 	defer ws.Close()
+	ws.SetReadLimit(maxIrcLineLen)
 
 	client := t.gateway.NewClient()
 
@@ -81,12 +82,13 @@ func (t *TransportWebsocket) websocketHandler(w http.ResponseWriter, req *http.R
 				break
 			}
 			if len(p) > 0 {
-				message := string(p)
-				client.Log(1, "client->: %s", message)
-				select {
-				case client.Recv <- message:
-				default:
-					client.Log(3, "Recv queue full. Dropping data")
+				for _, message := range splitClientLines(string(p)) {
+					client.Log(1, "client->: %s", message)
+					select {
+					case client.Recv <- message:
+					default:
+						client.Log(3, "Recv queue full. Dropping data")
+					}
 				}
 			}
 		}

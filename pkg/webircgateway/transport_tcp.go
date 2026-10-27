@@ -39,10 +39,15 @@ func (t *TransportTcp) Start(lAddr string) {
 func (t *TransportTcp) handleConn(conn net.Conn) {
 	client := t.gateway.NewClient()
 
-	client.RemoteAddr = conn.RemoteAddr().String()
+	remoteHost, remoteAddrPort, splitErr := net.SplitHostPort(conn.RemoteAddr().String())
+	if splitErr == nil {
+		client.RemoteAddr = remoteHost
+	} else {
+		client.RemoteAddr = conn.RemoteAddr().String()
+	}
 
 	clientHostnames, err := net.LookupAddr(client.RemoteAddr)
-	if err != nil {
+	if err != nil || len(clientHostnames) == 0 {
 		client.RemoteHostname = client.RemoteAddr
 	} else {
 		// FQDNs include a . at the end. Strip it out
@@ -57,7 +62,6 @@ func (t *TransportTcp) handleConn(conn net.Conn) {
 		}
 	}
 
-	_, remoteAddrPort, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	client.Tags["remote-port"] = remoteAddrPort
 
 	client.Log(2, "New tcp client on %s from %s %s", conn.LocalAddr().String(), client.RemoteAddr, client.RemoteHostname)
@@ -69,11 +73,14 @@ func (t *TransportTcp) handleConn(conn net.Conn) {
 
 	// Read from TCP
 	go func() {
-		reader := bufio.NewReader(conn)
+		reader := bufio.NewReaderSize(conn, maxIrcLineLen)
 		for {
-			data, err := reader.ReadString('\n')
+			data, err := readBoundedLine(reader)
 			if err == nil {
-				message := strings.TrimRight(data, "\r\n")
+				message := sanitizeIrcText(strings.TrimRight(data, "\r\n"))
+				if message == "" {
+					continue
+				}
 				client.Log(1, "client->: %s", message)
 				select {
 				case client.Recv <- message:

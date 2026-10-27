@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gobwas/glob"
 	"gopkg.in/ini.v1"
@@ -48,16 +49,19 @@ type ConfigProxy struct {
 	Hostname  string
 	Port      int
 	TLS       bool
+	TLSVerify bool
 	Username  string
 	Interface string
 }
 
 // Config - Config options for the running app
 type Config struct {
+	mu                    sync.RWMutex
 	gateway               *Gateway
 	ConfigFile            string
 	LogLevel              int
 	Gateway               bool
+	GatewayTLSVerify      bool
 	GatewayName           string
 	GatewayWhitelist      []*glob.Pattern
 	GatewayThrottle       int
@@ -89,11 +93,38 @@ type Config struct {
 }
 
 func NewConfig(gateway *Gateway) *Config {
-	return &Config{gateway: gateway}
+	return &Config{
+		gateway:          gateway,
+		LogLevel:         3,
+		GatewayTLSVerify: true,
+		Proxy: ConfigServer{
+			LocalAddr: "127.0.0.1",
+			Port:      7999,
+		},
+	}
+}
+
+func (c *Config) RLock() {
+	c.mu.RLock()
+}
+
+func (c *Config) RUnlock() {
+	c.mu.RUnlock()
+}
+
+func (c *Config) Lock() {
+	c.mu.Lock()
+}
+
+func (c *Config) Unlock() {
+	c.mu.Unlock()
 }
 
 // ConfigResolvePath - If relative, resolve a path to it's full absolute path relative to the config file
 func (c *Config) ResolvePath(path string) string {
+	if path == "" {
+		return filepath.Dir(c.ConfigFile)
+	}
 	// Absolute paths should stay as they are
 	if path[0:1] == "/" {
 		return path
@@ -105,6 +136,9 @@ func (c *Config) ResolvePath(path string) string {
 }
 
 func (c *Config) SetConfigFile(configFile string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	// Config paths starting with $ is executed rather than treated as a path
 	if strings.HasPrefix(configFile, "$ ") {
 		c.ConfigFile = configFile
@@ -115,21 +149,25 @@ func (c *Config) SetConfigFile(configFile string) {
 
 // CurrentConfigFile - Return the full path or command for the config file in use
 func (c *Config) CurrentConfigFile() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	return c.ConfigFile
 }
 
 func (c *Config) Load() error {
 	var configSrc interface{}
 
-	if strings.HasPrefix(c.ConfigFile, "$ ") {
-		cmdRawOut, err := exec.Command("sh", "-c", c.ConfigFile[2:]).Output()
+	configFile := c.CurrentConfigFile()
+	if strings.HasPrefix(configFile, "$ ") {
+		cmdRawOut, err := exec.Command("sh", "-c", configFile[2:]).Output()
 		if err != nil {
 			return err
 		}
 
 		configSrc = cmdRawOut
 	} else {
-		configSrc = c.ConfigFile
+		configSrc = configFile
 	}
 
 	cfg, err := ini.LoadSources(ini.LoadOptions{AllowBooleanKeys: true, SpaceBeforeInlineComment: true}, configSrc)
@@ -137,10 +175,29 @@ func (c *Config) Load() error {
 		return err
 	}
 
+	var warnings []string
+
+	c.mu.Lock()
+	defer func() {
+		c.mu.Unlock()
+		for _, w := range warnings {
+			c.gateway.Log(3, "%s", w)
+		}
+	}()
+
 	// Clear the existing config
 	c.Gateway = false
+	c.GatewayTLSVerify = true
+	c.GatewayName = ""
+	c.GatewayThrottle = 2
+	c.GatewayTimeout = 10
+	c.GatewayProtocol = "tcp"
+	c.GatewayLocalAddr = ""
 	c.GatewayWebircPassword = make(map[string]string)
-	c.Proxy = ConfigServer{}
+	c.Proxy = ConfigServer{
+		LocalAddr: "127.0.0.1",
+		Port:      7999,
+	}
 	c.Upstreams = []ConfigUpstream{}
 	c.Servers = []ConfigServer{}
 	c.ServerTransports = []string{}
@@ -157,6 +214,7 @@ func (c *Config) Load() error {
 	c.ClientRealname = ""
 	c.ClientUsername = ""
 	c.ClientHostname = ""
+	c.Plugins = []string{}
 	c.DnsblServers = []string{}
 	c.DnsblAction = ""
 
@@ -164,7 +222,7 @@ func (c *Config) Load() error {
 		if strings.Index(section.Name(), "DEFAULT") == 0 {
 			c.LogLevel = section.Key("logLevel").MustInt(3)
 			if c.LogLevel < 1 || c.LogLevel > 3 {
-				c.gateway.Log(3, "Config option logLevel must be between 1-3. Setting default value of 3.")
+				warnings = append(warnings, "Config option logLevel must be between 1-3. Setting default value of 3.")
 				c.LogLevel = 3
 			}
 
@@ -172,7 +230,7 @@ func (c *Config) Load() error {
 
 			c.GatewayName = section.Key("gateway_name").MustString("")
 			if strings.Contains(c.GatewayName, " ") {
-				c.gateway.Log(3, "Config option gateway_name must not contain spaces")
+				warnings = append(warnings, "Config option gateway_name must not contain spaces")
 				c.GatewayName = ""
 			}
 
@@ -183,7 +241,8 @@ func (c *Config) Load() error {
 		if section.Name() == "verify" {
 			captchaSecret := section.Key("recaptcha_secret").MustString("")
 			captchaKey := section.Key("recaptcha_key").MustString("")
-			if captchaSecret != "" && captchaKey != "" {
+			c.ReCaptchaKey = captchaKey
+			if captchaSecret != "" {
 				c.RequiresVerification = section.Key("required").MustBool(false)
 				c.ReCaptchaSecret = captchaSecret
 			}
@@ -200,6 +259,7 @@ func (c *Config) Load() error {
 
 		if section.Name() == "gateway" {
 			c.Gateway = section.Key("enabled").MustBool(false)
+			c.GatewayTLSVerify = section.Key("tls_verify").MustBool(true)
 			c.GatewayTimeout = section.Key("timeout").MustInt(10)
 			c.GatewayThrottle = section.Key("throttle").MustInt(2)
 
@@ -210,7 +270,7 @@ func (c *Config) Load() error {
 
 		if section.Name() == "gateway.webirc" {
 			for _, serverAddr := range section.KeyStrings() {
-				c.GatewayWebircPassword[serverAddr] = section.Key(serverAddr).MustString("")
+				c.GatewayWebircPassword[strings.ToLower(serverAddr)] = section.Key(serverAddr).MustString("")
 			}
 		}
 
@@ -258,7 +318,7 @@ func (c *Config) Load() error {
 
 		if section.Name() == "proxy" {
 			server := ConfigServer{}
-			server.LocalAddr = confKeyAsString(section.Key("bind"), "0.0.0.0")
+			server.LocalAddr = confKeyAsString(section.Key("bind"), "127.0.0.1")
 			server.Port = confKeyAsInt(section.Key("port"), 7999)
 			c.Proxy = server
 		}
@@ -288,7 +348,7 @@ func (c *Config) Load() error {
 
 			upstream.GatewayName = section.Key("gateway_name").MustString("")
 			if strings.Contains(upstream.GatewayName, " ") {
-				c.gateway.Log(3, "Config option gateway_name must not contain spaces")
+				warnings = append(warnings, "Config option gateway_name must not contain spaces")
 				upstream.GatewayName = ""
 			}
 
@@ -312,9 +372,9 @@ func (c *Config) Load() error {
 
 		if strings.Index(section.Name(), "allowed_origins") == 0 {
 			for _, origin := range section.KeyStrings() {
-				match, err := glob.Compile(origin)
+				match, err := glob.Compile(strings.ToLower(origin))
 				if err != nil {
-					c.gateway.Log(3, "Config section allowed_origins has invalid match, "+origin)
+					warnings = append(warnings, "Config section allowed_origins has invalid match, "+origin)
 					continue
 				}
 				c.RemoteOrigins = append(c.RemoteOrigins, match)
@@ -323,9 +383,9 @@ func (c *Config) Load() error {
 
 		if strings.Index(section.Name(), "gateway.whitelist") == 0 {
 			for _, origin := range section.KeyStrings() {
-				match, err := glob.Compile(origin)
+				match, err := glob.Compile(strings.ToLower(origin))
 				if err != nil {
-					c.gateway.Log(3, "Config section gateway.whitelist has invalid match, "+origin)
+					warnings = append(warnings, "Config section gateway.whitelist has invalid match, "+origin)
 					continue
 				}
 				c.GatewayWhitelist = append(c.GatewayWhitelist, match)
@@ -336,7 +396,7 @@ func (c *Config) Load() error {
 			for _, cidrRange := range section.KeyStrings() {
 				_, validRange, cidrErr := net.ParseCIDR(cidrRange)
 				if cidrErr != nil {
-					c.gateway.Log(3, "Config section reverse_proxies has invalid entry, "+cidrRange)
+					warnings = append(warnings, "Config section reverse_proxies has invalid entry, "+cidrRange)
 					continue
 				}
 				c.ReverseProxies = append(c.ReverseProxies, *validRange)

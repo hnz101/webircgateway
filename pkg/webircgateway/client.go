@@ -48,6 +48,7 @@ type Client struct {
 	SeenQuit         bool
 	Recv             chan string
 	ThrottledRecv    *ThrottledStringChannel
+	upstreamLock     sync.Mutex
 	upstream         io.ReadWriteCloser
 	UpstreamRecv     chan string
 	UpstreamSend     chan string
@@ -103,9 +104,10 @@ func NewClient(gateway *Gateway) *Client {
 	}
 
 	// Auto enable some features by default. They may be disabled later on
-	c.Features.ExtJwt = true
-
+	gateway.Config.RLock()
+	c.Features.ExtJwt = gateway.Config.Secret != ""
 	c.RequiresVerification = gateway.Config.RequiresVerification
+	gateway.Config.RUnlock()
 
 	// Handles data to/from the client and upstreams
 	go c.clientLineWorker()
@@ -159,27 +161,37 @@ func (c *Client) TrafficLog(isUpstream bool, toGateway bool, traffic string) {
 }
 
 func (c *Client) Ready() {
+	c.Gateway.Config.RLock()
 	dnsblAction := c.Gateway.Config.DnsblAction
+	dnsblServers := c.Gateway.Config.DnsblServers
+	requiresVerification := c.Gateway.Config.RequiresVerification
+	c.Gateway.Config.RUnlock()
+
 	validAction := dnsblAction == "verify" || dnsblAction == "deny"
 	dnsblTookAction := ""
 
-	if len(c.Gateway.Config.DnsblServers) > 0 && c.RemoteAddr != "" && !c.Verified && validAction {
+	if len(dnsblServers) > 0 && c.RemoteAddr != "" && !c.Verified && validAction {
 		dnsblTookAction = c.checkDnsBl()
 	}
 
-	if dnsblTookAction == "" && c.Gateway.Config.RequiresVerification && !c.Verified {
+	if dnsblTookAction == "" && requiresVerification && !c.Verified {
 		c.SendClientSignal("data", "CAPTCHA NEEDED")
 	}
 }
 
 func (c *Client) checkDnsBl() (tookAction string) {
-	dnsResult := dnsbl.Lookup(c.Gateway.Config.DnsblServers, c.RemoteAddr)
-	if dnsResult.Listed && c.Gateway.Config.DnsblAction == "deny" {
+	c.Gateway.Config.RLock()
+	dnsblServers := c.Gateway.Config.DnsblServers
+	dnsblAction := c.Gateway.Config.DnsblAction
+	c.Gateway.Config.RUnlock()
+
+	dnsResult := dnsbl.Lookup(dnsblServers, c.RemoteAddr)
+	if dnsResult.Listed && dnsblAction == "deny" {
 		c.SendIrcError("Blocked by DNSBL")
 		c.SendClientSignal("state", "closed", "dnsbl_listed")
 		c.StartShutdown("dnsbl")
 		tookAction = "deny"
-	} else if dnsResult.Listed && c.Gateway.Config.DnsblAction == "verify" {
+	} else if dnsResult.Listed && dnsblAction == "verify" {
 		c.RequiresVerification = true
 		c.SendClientSignal("data", "CAPTCHA NEEDED")
 		tookAction = "verify"
@@ -192,6 +204,29 @@ func (c *Client) IsShuttingDown() bool {
 	c.shuttingDownLock.Lock()
 	defer c.shuttingDownLock.Unlock()
 	return c.shuttingDown
+}
+
+func (c *Client) setUpstream(u io.ReadWriteCloser) {
+	c.upstreamLock.Lock()
+	c.upstream = u
+	c.upstreamLock.Unlock()
+}
+
+func (c *Client) getUpstream() io.ReadWriteCloser {
+	c.upstreamLock.Lock()
+	u := c.upstream
+	c.upstreamLock.Unlock()
+	return u
+}
+
+func (c *Client) closeUpstream() {
+	c.upstreamLock.Lock()
+	u := c.upstream
+	c.upstream = nil
+	c.upstreamLock.Unlock()
+	if u != nil {
+		_ = u.Close()
+	}
 }
 
 func (c *Client) StartShutdown(reason string) {
@@ -266,8 +301,8 @@ func (c *Client) connectUpstream() {
 			return
 		}
 	} else {
-		if !c.Gateway.isIrcAddressAllowed(client.DestHost) {
-			client.Log(2, "Server %s is not allowed. Closing connection", client.DestHost)
+		if !c.Gateway.isIrcAddressAllowed(client.DestHost) || client.DestPort < 1024 || client.DestPort > 65535 {
+			client.Log(2, "Server %s:%d is not allowed. Closing connection", client.DestHost, client.DestPort)
 			client.SendIrcError("Not allowed to connect to " + client.DestHost)
 			client.SendClientSignal("state", "closed", "err_forbidden")
 			client.StartShutdown("err_no_upstream")
@@ -301,7 +336,7 @@ func (c *Client) connectUpstream() {
 
 	client.State = ClientStateRegistering
 
-	client.upstream = upstream
+	client.setUpstream(upstream)
 	client.readUpstream()
 	client.writeWebircLines(upstream)
 	client.maybeSendPass(upstream)
@@ -331,12 +366,26 @@ func (c *Client) makeUpstreamConnection() (io.ReadWriteCloser, error) {
 			}
 		}
 
+		if client.DestHost != "" {
+			dialer.Control = func(network, address string, c syscall.RawConn) error {
+				host, _, err := net.SplitHostPort(address)
+				if err != nil {
+					return err
+				}
+				ip := net.ParseIP(host)
+				if isInternalOrRestrictedIP(ip) {
+					return errors.New("connection to internal or restricted IP is not allowed")
+				}
+				return nil
+			}
+		}
+
 		var conn net.Conn
 		var connErr error
 		if upstreamConfig.Protocol == "unix" {
 			conn, connErr = dialer.Dial("unix", upstreamConfig.Hostname)
 		} else {
-			upstreamStr := fmt.Sprintf("%s:%d", upstreamConfig.Hostname, upstreamConfig.Port)
+			upstreamStr := net.JoinHostPort(upstreamConfig.Hostname, strconv.Itoa(upstreamConfig.Port))
 			conn, connErr = dialer.Dial(upstreamConfig.Protocol, upstreamStr)
 		}
 
@@ -353,7 +402,10 @@ func (c *Client) makeUpstreamConnection() (io.ReadWriteCloser, error) {
 
 		// Add the ports into the identd before possible TLS handshaking. If we do it after then
 		// there's a good chance the identd lookup will occur before the handshake has finished
-		if c.Gateway.Config.Identd {
+		c.Gateway.Config.RLock()
+		identdEnabled := c.Gateway.Config.Identd
+		c.Gateway.Config.RUnlock()
+		if identdEnabled {
 			// Keep track of the upstreams local and remote port numbers
 			_, lPortStr, _ := net.SplitHostPort(conn.LocalAddr().String())
 			client.IrcState.LocalPort, _ = strconv.Atoi(lPortStr)
@@ -369,8 +421,16 @@ func (c *Client) makeUpstreamConnection() (io.ReadWriteCloser, error) {
 				ServerName:         upstreamConfig.Hostname,
 			}
 			tlsConn := tls.Client(conn, tlsConfig)
+			if upstreamConfig.Timeout > 0 {
+				_ = conn.SetDeadline(time.Now().Add(time.Second * time.Duration(upstreamConfig.Timeout)))
+			}
 			err := tlsConn.Handshake()
+			_ = conn.SetDeadline(time.Time{})
 			if err != nil {
+				conn.Close()
+				if identdEnabled && client.IrcState.RemotePort > 0 {
+					c.Gateway.identdServ.RemoveIdent(client.IrcState.LocalPort, client.IrcState.RemotePort, "")
+				}
 				client.Log(3, "Error connecting to the upstream IRCd. %s", err.Error())
 				client.SendClientSignal("state", "closed", "err_tls")
 				client.StartShutdown("err_connecting_upstream")
@@ -389,13 +449,13 @@ func (c *Client) makeUpstreamConnection() (io.ReadWriteCloser, error) {
 		conn.DestHost = upstreamConfig.Hostname
 		conn.DestPort = upstreamConfig.Port
 		conn.DestTLS = upstreamConfig.TLS
+		conn.DestTLSVerify = upstreamConfig.TLSVerify
 		conn.Username = upstreamConfig.Proxy.Username
 		conn.ProxyInterface = upstreamConfig.Proxy.Interface
 
-		dialErr := conn.Dial(fmt.Sprintf(
-			"%s:%d",
+		dialErr := conn.Dial(net.JoinHostPort(
 			upstreamConfig.Proxy.Hostname,
-			upstreamConfig.Proxy.Port,
+			strconv.Itoa(upstreamConfig.Proxy.Port),
 		))
 
 		if dialErr != nil {
@@ -430,12 +490,21 @@ func (c *Client) writeWebircLines(upstream io.ReadWriteCloser) {
 		return
 	}
 
+	c.Gateway.Config.RLock()
+	cfgGatewayName := c.Gateway.Config.GatewayName
+	cfgClientHostname := c.Gateway.Config.ClientHostname
+	c.Gateway.Config.RUnlock()
+
 	gatewayName := "webircgateway"
-	if c.Gateway.Config.GatewayName != "" {
-		gatewayName = c.Gateway.Config.GatewayName
+	if cfgGatewayName != "" {
+		gatewayName = cfgGatewayName
 	}
 	if c.UpstreamConfig.GatewayName != "" {
 		gatewayName = c.UpstreamConfig.GatewayName
+	}
+	gatewayName = sanitizeIrcToken(gatewayName)
+	if gatewayName == "" {
+		gatewayName = "webircgateway"
 	}
 
 	webircTags := c.buildWebircTags()
@@ -444,20 +513,24 @@ func (c *Client) writeWebircLines(upstream io.ReadWriteCloser) {
 	}
 
 	clientHostname := c.RemoteHostname
-	if c.Gateway.Config.ClientHostname != "" {
-		clientHostname = makeClientReplacements(c.Gateway.Config.ClientHostname, c)
+	if cfgClientHostname != "" {
+		clientHostname = makeClientReplacements(cfgClientHostname, c)
+	}
+	clientHostname = sanitizeIrcToken(clientHostname)
+	if clientHostname == "" {
+		clientHostname = sanitizeIrcToken(c.RemoteAddr)
 	}
 
-	remoteAddr := c.RemoteAddr
+	remoteAddr := sanitizeIrcToken(c.RemoteAddr)
 	// Prefix IPv6 addresses that start with a : so they can be sent as an individual IRC
 	//  parameter. eg. ::1 would not parse correctly as a parameter, while 0::1 will
-	if strings.HasPrefix(remoteAddr, ":") {
-		remoteAddr = "0" + remoteAddr
+	if strings.HasPrefix( c.RemoteAddr, ":") {
+		remoteAddr = "0" + sanitizeIrcText(strings.ReplaceAll(c.RemoteAddr, " ", ""))
 	}
 
 	webircLine := fmt.Sprintf(
 		"WEBIRC %s %s %s %s %s\n",
-		c.UpstreamConfig.WebircPassword,
+		sanitizeIrcToken(c.UpstreamConfig.WebircPassword),
 		gatewayName,
 		clientHostname,
 		remoteAddr,
@@ -474,7 +547,7 @@ func (c *Client) maybeSendPass(upstream io.ReadWriteCloser) {
 	c.SentPass = true
 	passLine := fmt.Sprintf(
 		"PASS %s\n",
-		c.UpstreamConfig.ServerPassword,
+		sanitizeIrcText(c.UpstreamConfig.ServerPassword),
 	)
 	c.Log(1, "->upstream: %s", passLine)
 	upstream.Write([]byte(passLine))
@@ -484,21 +557,30 @@ func (c *Client) processLineToUpstream(data string) {
 	client := c
 	upstreamConfig := c.UpstreamConfig
 
-	if strings.HasPrefix(data, "PASS ") && c.SentPass {
-		// Hijack the PASS command if we already sent a pass command
-		return
-	} else if strings.HasPrefix(data, "USER ") {
-		// Hijack the USER command as we may have some overrides
-		data = fmt.Sprintf(
-			"USER %s 0 * :%s",
-			client.IrcState.Username,
-			client.IrcState.RealName,
-		)
-	} else if strings.HasPrefix(strings.ToUpper(data), "QUIT ") {
-		client.SeenQuit = true
+	data = sanitizeIrcText(data)
+	message, parseErr := irc.ParseLine(data)
+	if parseErr == nil {
+		cmdUpper := strings.ToUpper(message.Command)
+		if cmdUpper == "PASS" && c.SentPass {
+			// Hijack the PASS command if we already sent a pass command
+			return
+		} else if cmdUpper == "USER" {
+			// Hijack the USER command as we may have some overrides
+			username := sanitizeIrcToken(client.IrcState.Username)
+			if username == "" {
+				username = "webirc"
+			}
+			realname := sanitizeIrcText(client.IrcState.RealName)
+			data = fmt.Sprintf(
+				"USER %s 0 * :%s",
+				username,
+				realname,
+			)
+			message, _ = irc.ParseLine(data)
+		} else if cmdUpper == "QUIT" {
+			client.SeenQuit = true
+		}
 	}
-
-	message, _ := irc.ParseLine(data)
 
 	hook := &HookIrcLine{
 		Client:         client,
@@ -522,8 +604,8 @@ func (c *Client) processLineToUpstream(data string) {
 		return
 	}
 
-	if client.upstream != nil {
-		client.upstream.Write([]byte(data + "\r\n"))
+	if u := client.getUpstream(); u != nil {
+		u.Write([]byte(data + "\r\n"))
 	} else {
 		client.Log(2, "Tried sending data upstream before connected")
 	}
@@ -610,12 +692,16 @@ func typeOfErr(err error) string {
 
 func (c *Client) readUpstream() {
 	client := c
+	upstream := client.getUpstream()
+	if upstream == nil {
+		return
+	}
 
 	// Data from upstream to client
 	go func() {
-		reader := bufio.NewReader(client.upstream)
+		reader := bufio.NewReaderSize(upstream, maxIrcLineLen)
 		for {
-			data, err := reader.ReadString('\n')
+			data, err := readBoundedLine(reader)
 			if err != nil {
 				break
 			}
@@ -625,8 +711,7 @@ func (c *Client) readUpstream() {
 		}
 
 		close(client.UpstreamRecv)
-		client.upstream.Close()
-		client.upstream = nil
+		client.closeUpstream()
 
 		if client.IrcState.RemotePort > 0 {
 			c.Gateway.identdServ.RemoveIdent(client.IrcState.LocalPort, client.IrcState.RemotePort, "")
@@ -660,7 +745,7 @@ func (c *Client) handleDataLine() (shouldQuit bool, hadErr bool) {
 
 	// We only want to send data upstream if we have an upstream connection
 	upstreamSend := c.UpstreamSend
-	if c.upstream == nil {
+	if c.getUpstream() == nil {
 		upstreamSend = nil
 	}
 
@@ -668,15 +753,16 @@ func (c *Client) handleDataLine() (shouldQuit bool, hadErr bool) {
 	case clientData, ok := <-c.ThrottledRecv.Output:
 		if !ok {
 			c.Log(1, "client.Recv closed")
-			if !c.SeenQuit && c.Gateway.Config.SendQuitOnClientClose != "" && c.State == ClientStateEnding {
-				c.processLineToUpstream("QUIT :" + c.Gateway.Config.SendQuitOnClientClose)
+			c.Gateway.Config.RLock()
+			quitMsg := c.Gateway.Config.SendQuitOnClientClose
+			c.Gateway.Config.RUnlock()
+
+			if !c.SeenQuit && quitMsg != "" && (c.State == ClientStateConnected || c.State == ClientStateEnding) {
+				c.processLineToUpstream("QUIT :" + quitMsg)
 			}
 
 			c.StartShutdown("client_closed")
-
-			if c.upstream != nil {
-				c.upstream.Close()
-			}
+			c.closeUpstream()
 			return true, false
 		}
 		c.Log(1, "in c.ThrottledRecv.Output")
@@ -684,7 +770,11 @@ func (c *Client) handleDataLine() (shouldQuit bool, hadErr bool) {
 
 		clientLine, err := c.ProcessLineFromClient(clientData)
 		if err == nil && clientLine != "" {
-			c.UpstreamSend <- clientLine
+			select {
+			case c.UpstreamSend <- clientLine:
+			default:
+				c.Log(3, "UpstreamSend queue full. Dropping data")
+			}
 		}
 
 	case line, ok := <-upstreamSend:
@@ -713,15 +803,24 @@ func (c *Client) handleDataLine() (shouldQuit bool, hadErr bool) {
 
 // configureUpstream - Generate an upstream configuration from the information set on the client instance
 func (c *Client) configureUpstream() ConfigUpstream {
+	c.Gateway.Config.RLock()
+	tlsVerify := c.Gateway.Config.GatewayTLSVerify
+	timeout := c.Gateway.Config.GatewayTimeout
+	throttle := c.Gateway.Config.GatewayThrottle
+	protocol := c.Gateway.Config.GatewayProtocol
+	localAddr := c.Gateway.Config.GatewayLocalAddr
+	c.Gateway.Config.RUnlock()
+
 	upstreamConfig := ConfigUpstream{}
 	upstreamConfig.Hostname = c.DestHost
 	upstreamConfig.Port = c.DestPort
 	upstreamConfig.TLS = c.DestTLS
-	upstreamConfig.Timeout = c.Gateway.Config.GatewayTimeout
-	upstreamConfig.Throttle = c.Gateway.Config.GatewayThrottle
+	upstreamConfig.TLSVerify = tlsVerify
+	upstreamConfig.Timeout = timeout
+	upstreamConfig.Throttle = throttle
 	upstreamConfig.WebircPassword = c.Gateway.findWebircPassword(c.DestHost)
-	upstreamConfig.Protocol = c.Gateway.Config.GatewayProtocol
-	upstreamConfig.LocalAddr = c.Gateway.Config.GatewayLocalAddr
+	upstreamConfig.Protocol = protocol
+	upstreamConfig.LocalAddr = localAddr
 
 	return upstreamConfig
 }
@@ -729,14 +828,20 @@ func (c *Client) configureUpstream() ConfigUpstream {
 func (c *Client) buildWebircTags() string {
 	str := ""
 	for key, val := range c.Tags {
+		cleanKey := sanitizeIrcToken(key)
+		if cleanKey == "" {
+			continue
+		}
+		cleanVal := sanitizeIrcToken(val)
+
 		if str != "" {
 			str += " "
 		}
 
-		if val == "" {
-			str += key
+		if cleanVal == "" {
+			str += cleanKey
 		} else {
-			str += key + "=" + val
+			str += cleanKey + "=" + cleanVal
 		}
 	}
 

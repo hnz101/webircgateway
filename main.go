@@ -82,7 +82,9 @@ func watchForSignals(gateway *webircgateway.Gateway) {
 			gateway.Close()
 		case syscall.SIGHUP:
 			fmt.Println("Recieved SIGHUP, reloading config file")
-			gateway.Config.Load()
+			if err := gateway.Config.Load(); err != nil {
+				log.Printf("Config reload error: %s", err.Error())
+			}
 		}
 	}
 }

@@ -30,14 +30,14 @@ func (t *TransportKiwiirc) Init(g *Gateway) {
 }
 
 func (t *TransportKiwiirc) makeChannel(chanID string, ws sockjs.Session) *TransportKiwiircChannel {
-	client := t.gateway.NewClient()
-
 	originHeader := strings.ToLower(ws.Request().Header.Get("Origin"))
 	if !t.gateway.IsClientOriginAllowed(originHeader) {
-		client.Log(2, "Origin %s not allowed. Closing connection", originHeader)
+		t.gateway.Log(2, "Origin %s not allowed. Closing connection", originHeader)
 		ws.Close(0, "Origin not allowed")
 		return nil
 	}
+
+	client := t.gateway.NewClient()
 
 	client.RemoteAddr = t.gateway.GetRemoteAddressFromRequest(ws.Request()).String()
 
@@ -93,59 +93,69 @@ func (t *TransportKiwiirc) sessionHandler(session sockjs.Session) {
 	channels := cmap.New[*TransportKiwiircChannel]()
 
 	// Read from sockjs
-	go func() {
-		for {
-			msg, err := session.Recv()
-			if err == nil && len(msg) > 0 {
-				idEnd := strings.Index(msg, " ")
-				if idEnd == -1 {
-					// msg is in the form of ":chanId"
-					chanID := msg[1:]
-
-					channel, channelExists := channels.Get(chanID)
-					if channelExists {
-						channel.close()
-					}
-
-					if !channelExists {
-						channel := t.makeChannel(chanID, session)
-						if channel == nil {
-							continue
-						}
-						channels.Set(chanID, channel)
-
-						// When the channel closes, remove it from the map again
-						go func() {
-							<-channel.waitForClose
-							channel.Client.Log(2, "Removing channel from connection")
-							channels.Remove(chanID)
-						}()
-					}
-
-					session.Send(":" + chanID)
-
-				} else {
-					// msg is in the form of ":chanId data"
-					chanID := msg[1:idEnd]
-					data := msg[idEnd+1:]
-
-					channel, channelExists := channels.Get(chanID)
-					if channelExists {
-						channel.handleIncomingLine(data)
-					}
-				}
-			} else if err != nil {
-				t.gateway.Log(1, "kiwi connection closed (%s)", err.Error())
-				break
+	for {
+		msg, err := session.Recv()
+		if err == nil && len(msg) > 0 {
+			if !strings.HasPrefix(msg, ":") {
+				continue
 			}
-		}
 
-		for channel := range channels.IterBuffered() {
-			c := channel.Val
-			c.Closed = true
-			c.Client.StartShutdown("client_closed")
+			idEnd := strings.Index(msg, " ")
+			if idEnd == -1 {
+				// msg is in the form of ":chanId"
+				chanID := msg[1:]
+				if chanID == "" {
+					continue
+				}
+
+				channel, channelExists := channels.Get(chanID)
+				if channelExists {
+					channel.close()
+				}
+
+				if !channelExists {
+					channel := t.makeChannel(chanID, session)
+					if channel == nil {
+						continue
+					}
+					channels.Set(chanID, channel)
+
+					// When the channel closes, remove it from the map again
+					go func() {
+						<-channel.waitForClose
+						channel.Client.Log(2, "Removing channel from connection")
+						channels.Remove(chanID)
+					}()
+				}
+
+				session.Send(":" + chanID)
+
+			} else {
+				// msg is in the form of ":chanId data"
+				if idEnd <= 1 {
+					continue
+				}
+				chanID := msg[1:idEnd]
+				data := msg[idEnd+1:]
+
+				channel, channelExists := channels.Get(chanID)
+				if channelExists {
+					channel.handleIncomingLine(data)
+				}
+			}
+		} else if err != nil {
+			t.gateway.Log(1, "kiwi connection closed (%s)", err.Error())
+			break
 		}
-	}()
+	}
+
+	for channel := range channels.IterBuffered() {
+		c := channel.Val
+		c.ClosedLock.Lock()
+		c.Closed = true
+		c.ClosedLock.Unlock()
+		c.Client.StartShutdown("client_closed")
+	}
 }
 
 type TransportKiwiircChannel struct {
@@ -189,16 +199,19 @@ func (c *TransportKiwiircChannel) listenForSignals() {
 
 func (c *TransportKiwiircChannel) handleIncomingLine(line string) {
 	c.ClosedLock.Lock()
+	defer c.ClosedLock.Unlock()
 
 	if !c.Closed {
-		c.Client.Recv <- line
+		for _, subLine := range splitClientLines(line) {
+			select {
+			case c.Client.Recv <- subLine:
+			default:
+				c.Client.Log(3, "Recv queue full. Dropping data")
+			}
+		}
 	}
-
-	c.ClosedLock.Unlock()
 }
 
 func (c *TransportKiwiircChannel) close() {
-	if c.Client.upstream != nil {
-		c.Client.upstream.Close()
-	}
+	c.Client.closeUpstream()
 }

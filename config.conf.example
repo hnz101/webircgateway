@@ -83,11 +83,11 @@ kiwiirc
 # The user IPs are read from the standard X-Forwarded-For HTTP header
 [reverse_proxies]
 127.0.0.0/8
-10.0.0.0/8
-172.16.0.0/12
-192.168.0.0/16
 "::1/128"
-"fd00::/8"
+#10.0.0.0/8
+#172.16.0.0/12
+#192.168.0.0/16
+#"fd00::/8"
 
 # Connections will be sent to a random upstream
 [upstream.1]
@@ -115,6 +115,9 @@ localaddr = ""
 # network below) through the kiwiirc engine
 [gateway]
 enabled = false
+# Verify TLS certificate chain and hostname for upstream TLS connections (default: true).
+# Set to false only for servers with self-signed certificates.
+#tls_verify = true
 timeout = 5
 throttle = 2
 # Outgoing protocol, valid options: tcp, tcp4, tcp6

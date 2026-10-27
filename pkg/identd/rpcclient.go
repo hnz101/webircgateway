@@ -1,23 +1,31 @@
 package identd
 
-import "net"
-import "fmt"
-import "time"
+import (
+	"fmt"
+	"net"
+	"sync"
+	"time"
+)
 
 func MakeRpcClient(appName string) *RpcClient {
 	return &RpcClient{AppName: appName}
 }
 
 type RpcClient struct {
+	mu      sync.Mutex
 	AppName string
 	Conn    *net.Conn
 }
 
 func (rpc *RpcClient) ConnectAndReconnect(serverAddress string) {
 	for {
-		if rpc.Conn == nil {
+		rpc.mu.Lock()
+		isNil := rpc.Conn == nil
+		rpc.mu.Unlock()
+
+		if isNil {
 			println("Connecting to identd RPC...")
-			rpc.Connect(serverAddress)
+			_ = rpc.Connect(serverAddress)
 		}
 
 		time.Sleep(time.Second * 3)
@@ -25,18 +33,27 @@ func (rpc *RpcClient) ConnectAndReconnect(serverAddress string) {
 }
 
 func (rpc *RpcClient) Connect(serverAddress string) error {
-	conn, err := net.Dial("tcp", serverAddress)
+	conn, err := net.DialTimeout("tcp", serverAddress, 5*time.Second)
 	if err != nil {
 		return err
 	}
 
+	rpc.mu.Lock()
+	if rpc.Conn != nil {
+		_ = (*rpc.Conn).Close()
+	}
 	rpc.Conn = &conn
-	rpc.Write("id " + rpc.AppName)
+	rpc.mu.Unlock()
+
+	_ = rpc.Write("id " + sanitizeIdent(rpc.AppName))
 
 	return nil
 }
 
 func (rpc *RpcClient) Write(line string) error {
+	rpc.mu.Lock()
+	defer rpc.mu.Unlock()
+
 	if rpc.Conn == nil {
 		return fmt.Errorf("not connected")
 	}
@@ -45,15 +62,15 @@ func (rpc *RpcClient) Write(line string) error {
 	_, err := conn.Write([]byte(line + "\n"))
 	if err != nil {
 		rpc.Conn = nil
-		conn.Close()
+		_ = conn.Close()
 	}
 	return err
 }
 
 func (rpc *RpcClient) AddIdent(lport int, rport int, username string, iface string) {
-	rpc.Write(fmt.Sprintf("add %s %d %d %s", username, lport, rport, iface))
+	_ = rpc.Write(fmt.Sprintf("add %s %d %d %s", sanitizeIdent(username), lport, rport, sanitizeIdent(iface)))
 }
 
 func (rpc *RpcClient) RemoveIdent(lport int, rport int, username string, iface string) {
-	rpc.Write(fmt.Sprintf("del %d %d %s", lport, rport, iface))
+	_ = rpc.Write(fmt.Sprintf("del %d %d %s", lport, rport, sanitizeIdent(iface)))
 }
